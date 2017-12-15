@@ -86,6 +86,8 @@ import sys
 import re
 import shutil
 
+from core.utilities import mathutils
+
 import Red9.packages.configobj as configobj
 # from Red9.startup.setup import ProPack_Error
 
@@ -3535,6 +3537,7 @@ preCopyAttrs=%s : filterSettings=%s : matchMethod=%s : prioritySnapOnly=%s : sna
         '''
         really basic method used in the Mirror calls
         '''
+
         for chan in channels:
             try:
                 cmds.setAttr('%s.%s' % (node, chan), cmds.getAttr('%s.%s' % (node, chan)) * -1)
@@ -4501,6 +4504,11 @@ class MirrorHierarchy(object):
         :param mode: 'Anim' or 'Pose'
 
         '''
+
+        if cmds.attributeQuery("Reflect", node=objA, exists=True) and cmds.attributeQuery("Reflect", node=objB, exists=True):
+            MirrorHierarchy.reflect_objects(objA, objB)
+            return
+
         objs = cmds.ls(sl=True, l=True)
         if mode == 'Anim':
             transferCall = self.transferCallKeys  # AnimFunctions().copyKeys
@@ -4520,6 +4528,50 @@ class MirrorHierarchy(object):
         if objs:
             cmds.select(objs)
 
+    @staticmethod
+    def mirror_pose(xform_mat, axis=(1, 0, 0), offset_mat=[x for x in mathutils.Mat4.id()]):
+        """
+        will reflect the passed xform_mat across the passed axis and multiply it
+        by the offset_mat and apply it to the passed node
+        """
+
+        _source_mat = mathutils.Mat4(*xform_mat)
+        reflect_mat = mathutils.Mat4.reflect(mathutils.Vec3(*axis))
+        _offset_mat = mathutils.Mat4(*offset_mat)
+
+        return [x for x in (reflect_mat * _source_mat * _offset_mat)]
+
+    @staticmethod
+    def reflect_objects(src, dest):
+
+        temp = cmds.duplicate(dest)[0]
+        MirrorHierarchy.reflect_transforms(src, dest)
+        MirrorHierarchy.reflect_transforms(temp, src)
+        MirrorHierarchy.reflect_non_transforms(src, dest)
+        MirrorHierarchy.reflect_non_transforms(temp, src)
+        cmds.delete(temp)
+
+    @staticmethod
+    def reflect_transforms(src, dest):
+
+        src_mat = cmds.xform(src, query=True,
+                             matrix=True)  # query the local space of the source for the mirror
+        mirrored_mat = MirrorHierarchy.mirror_pose(src_mat, (1, 0, 0),
+                                   [-1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+                                    1.0])
+        cmds.xform(dest, matrix=mirrored_mat)
+
+    @staticmethod
+    def reflect_non_transforms(src, dest):
+
+        transform_attr = ['translateX','translateY', 'translateZ',
+                          'rotateX', 'rotateY', 'rotateZ',
+                          'scaleX', 'scaleY', 'scaleZ']
+        settable_attrs = getSettableChannels(src, incStatics=True)
+        attrs = set(settable_attrs)- set(transform_attr)
+        for attr in attrs:
+            cmds.setAttr('%s.%s' % (dest, attr), cmds.getAttr('%s.%s' % (src, attr)))
+
     def makeSymmetrical(self, nodes=None, mode='Anim', primeAxis='Left'):
         '''
         similar to the mirrorData except this is designed to take the data from an object in
@@ -4532,7 +4584,27 @@ class MirrorHierarchy(object):
         :param mode: 'Anim' ot 'Pose' process as a single pose or an animation
         :param primeAxis: 'Left' or 'Right' whether to take the data from the left or right side of the setup
         '''
-        self.getMirrorSets(nodes)
+
+        def filter_reflected_nodes(nodes):
+
+            reflect_nodes = list()
+            non_reflect_nodes = list()
+
+            for node in nodes:
+                if cmds.attributeQuery("Reflect", node=node, exists=True):
+                    reflect_nodes.append(node)
+                else:
+                    non_reflect_nodes.append(node)
+            return reflect_nodes, non_reflect_nodes
+
+        def make_symmetrical_reflect(nodes):
+
+            MirrorHierarchy.reflect_transforms(nodes[0], nodes[1])
+            MirrorHierarchy.reflect_non_transforms(nodes[0], nodes[1])
+
+        reflect_nodes , non_reflect_nodes = filter_reflected_nodes(nodes)
+        make_symmetrical_reflect(reflect_nodes)
+        self.getMirrorSets(non_reflect_nodes)
 
         if not self.indexednodes:
             raise IOError('No nodes mirrorIndexed nodes found from given / selected nodes')
@@ -4573,11 +4645,11 @@ class MirrorHierarchy(object):
         Using the FilterSettings obj find all nodes in the return that have
         the mirrorSide attr, then process the lists into Side and Index slots
         before Mirroring the animation data. Swapping left for right and
-        inversing the required animCurves
+        inverting the required animCurves
 
-        :param nodes: optional specific listy of nodes to process, else we run the filterSetting code 
+        :param nodes: optional specific list of nodes to process, else we run the filterSetting code
             on the initial nodes past to the class
-        :param mode: 'Anim' ot 'Pose' process as a single pose or an animation
+        :param mode: 'Anim' or 'Pose' process as a single pose or an animation
 
         TODO: Issue where if nodeA on Left has NO key data at all, and nodeB on right
         does, then nodeB will be left incorrect. We need to clean the data if there
